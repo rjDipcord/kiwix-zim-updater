@@ -114,7 +114,8 @@ usage_example() {
       --seed-time <minutes>      Stop seeding after minutes (default: 43200 = 30 days) [Only with CLI torrent clients]
       
       -f, --verify-library       Verifies that the entire library has the correct checksums as found online.
-                                 Expected behavior is to create sha256 files during a normal run so this option can be used at a later date without internet.
+                                 Expected behavior is to create sha256 files during a normal run so this option can be used at
+                                 a later date without internet.
                                  Disable this using -S
   
   Web Download Options:
