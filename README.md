@@ -70,6 +70,10 @@ Not checked or installed via script:
 
 - Git *(only needed for the self-update process to work.)*
 
+### If using the `--torrent` flag:
+A torrent client must be installed. The script will automatically determine what clients are installed, but it will prioritize use of a CLI-based client for a more hands-off execution. You can specify the client to use if you have multiple installed.
+In torrent mode, the script will automatically seed torrents until their ratio is at least 1.0 or 30 days have passed. These values are adjustable. See the `--help` option for usage.
+
 ## Install
 
 This script is self-updating. The self-update routine uses git commands to make the update so this script should be "installed" with the below command.
