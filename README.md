@@ -88,31 +88,39 @@ NOTE: if you are not tracking the `main` branch, the update check will be skippe
 ## Usage
 
 ```text
+usage_example() {
   Usage: ./kiwix-zim-updater.sh <options> /full/path/
   
       /full/path/                Full path to ZIM directory
   
   Universal Options:
       -h, --help                 Show this usage and exit.
-      -d, --disable-dry-run      Dry-Run Override.
-                                 *** Caution ***   
       -u, --skip-update          Skips checking for script updates (very useful for development).
       -g, --get-index            Forces using remote index rather than cached index. Cache auto clears after one day
+      -F, --force-download       Force re-download even if file is up-to-date (for development/testing).
       -n <size>, --min-size      Minimum ZIM Size to be downloaded.
                                  Specify units include M Mi G Gi, etc. See `man numfmt`
       -x <size>, --max-size      Maximum ZIM Size to be downloaded.
-                                 Specify units include M Mi G Gi, etc. See `man numfmt`      
+                                 Specify units include M Mi G Gi, etc. See `man numfmt`
+      -S, --no-sha               Disables saving the zim checksum for future reference. Does not delete present checksums.
                                  
   Action Method Options:
       -w, --web                  Downloads zims over http(s).
-      -t, --torrent              Downloads `.torrent` files. REQUIRES ADDITIONAL SOFTWARE TO EXECUTE DOWNLOAD.
+      -t, --torrent              Downloads torrent files and starts them in a torrent client.
+      --torrent-client <n>    Specify torrent client to use
+                                 Recommended: transmission-cli, aria2c, transmission-remote
+                                 GUI clients (qbittorrent, deluge) require user interaction
+      --seed-ratio <ratio>       Stop seeding when ratio reaches value (default: 1.0) [Only with CLI torrent clients]
+      --seed-time <minutes>      Stop seeding after minutes (default: 43200 = 30 days) [Only with CLI torrent clients]
       
+      -f, --verify-library       Verifies that the entire library has the correct checksums as found online.
+                                 Expected behavior is to create sha256 files during a normal run so this option can be used at a later date without internet.
+                                 Disable this using -S
+  
   Web Download Options:
       -c, --calculate-checksum   Verifies that the downloaded files were not corrupted, but can take a while for large downloads.
       -p, --skip-purge           Skips purging any replaced ZIMs.
       -l <location>, --location  Country Code to prefer mirrors from
-      -f, --verify-library       Verifies that the entire library has the correct checksums as found online.
-                                 Expected behavior is to create sha256 files during a normal run so this option can be used at a later date without internet.
-                                 Disable this using -S
-      -S, --no-sha               Disables saving the zim checksum for future reference. Does not delete present checksums.
+      -d, --disable-dry-run      Dry-Run Override.
+                                 *** Caution ***
 ```
