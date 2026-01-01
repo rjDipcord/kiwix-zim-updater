@@ -74,7 +74,7 @@ Not checked or installed via script:
 A torrent client must be installed. The script will automatically determine what clients are installed, but it will prioritize use of a CLI-based client for a more hands-off execution. You can specify the client to use if you have multiple installed.
 In torrent mode, the script will automatically seed torrents until their ratio is at least 1.0 or 30 days have passed. These values are adjustable. See the `--help` option for usage.
 
-*You should consider using this method as the primary way you update ZIMs. It supports the not-for-profit ecosystem Kiwix has developed, and gives you a no-fret way to give back to the community that makes this data available.*😊
+You should consider using this method as the primary way you update ZIMs. It supports the not-for-profit ecosystem Kiwix has developed, and gives you a no-fret way to give back to the community that makes this data available.😊
 
 ## Install
 
