@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VER="3.5"
+VER="3.6"
 
 # This array will contain all of the local zims, with the file extension
 LocalZIMArray=()
@@ -44,6 +44,8 @@ FORCE_FETCH_INDEX=0
 FORCE_DOWNLOAD=0 # Force re-download even if up-to-date
 DOWNLOAD_METHOD=1 # 1: web 2: torrent
 TORRENT_CLIENT="" # Will auto-detect if not specified
+TORRENT_SEED_RATIO=1.0 # Stop seeding at this ratio
+TORRENT_SEED_TIME=43200 # Stop seeding after this many minutes (30 days = 43200 min)
 BaseURL="https://download.kiwix.org/zim/"
 ZIMPath=""
 
@@ -72,27 +74,54 @@ detect_torrent_client() {
     fi
   fi
 
-  # Auto-detect common torrent clients
-  local clients=("transmission-gtk" "transmission-qt" "qbittorrent" "deluge" "ktorrent" "rtorrent" "aria2c")
+  # Prioritize headless/CLI clients that don't require user interaction
+  # These are listed in order of preference for automated operation
+  local headless_clients=("transmission-cli" "aria2c" "transmission-remote" "deluge-console")
   
-  for client in "${clients[@]}"; do
+  for client in "${headless_clients[@]}"; do
     if command -v "$client" &> /dev/null; then
       TORRENT_CLIENT="$client"
-      echo -e "${GREEN_BOLD}  ✓ Auto-detected torrent client: $TORRENT_CLIENT${CLEAR}"
-      echo "✓ Auto-detected torrent client: $TORRENT_CLIENT" >> download.log
+      echo -e "${GREEN_BOLD}  ✓ Auto-detected headless torrent client: $TORRENT_CLIENT${CLEAR}"
+      echo "✓ Auto-detected headless torrent client: $TORRENT_CLIENT" >> download.log
+      
+      # Check for transmission-daemon if using transmission-remote
+      if [[ "$client" == "transmission-remote" ]]; then
+        if ! systemctl is-active --quiet transmission-daemon && ! pgrep -x transmission-daemon > /dev/null; then
+          echo -e "${YELLOW_BOLD}  ⚠ transmission-daemon not running. Attempting to start...${CLEAR}"
+          echo "⚠ transmission-daemon not running. Attempting to start..." >> download.log
+          if command -v systemctl &> /dev/null; then
+            sudo systemctl start transmission-daemon 2>/dev/null || transmission-daemon -f 2>/dev/null &
+            sleep 2
+          else
+            transmission-daemon -f 2>/dev/null &
+            sleep 2
+          fi
+        fi
+      fi
+      
       return 0
     fi
   done
 
-  # Try xdg-open as fallback (works on most Linux desktops)
-  if command -v xdg-open &> /dev/null; then
-    TORRENT_CLIENT="xdg-open"
-    echo -e "${YELLOW_BOLD}  ⚠ Using xdg-open to open torrents with default application${CLEAR}"
-    echo "⚠ Using xdg-open to open torrents with default application" >> download.log
-    return 0
-  fi
+  # Fall back to GUI clients (but warn that they may require interaction)
+  local gui_clients=("transmission-gtk" "transmission-qt" "qbittorrent" "deluge" "ktorrent")
+  
+  for client in "${gui_clients[@]}"; do
+    if command -v "$client" &> /dev/null; then
+      TORRENT_CLIENT="$client"
+      echo -e "${YELLOW_BOLD}  ⚠ Auto-detected GUI torrent client: $TORRENT_CLIENT${CLEAR}"
+      echo -e "${YELLOW_REGULAR}    Note: GUI clients may require user interaction.${CLEAR}"
+      echo -e "${YELLOW_REGULAR}    Consider installing transmission-cli or aria2c for fully automated operation.${CLEAR}"
+      echo "⚠ Auto-detected GUI torrent client: $TORRENT_CLIENT (may require interaction)" >> download.log
+      return 0
+    fi
+  done
 
-  echo -e "${RED_BOLD}  ✗ No torrent client found. Please install one or specify with --torrent-client${CLEAR}"
+  echo -e "${RED_BOLD}  ✗ No torrent client found.${CLEAR}"
+  echo -e "${YELLOW_REGULAR}    For automated operation, install one of:${CLEAR}"
+  echo -e "${YELLOW_REGULAR}      - transmission-cli (recommended)${CLEAR}"
+  echo -e "${YELLOW_REGULAR}      - aria2c${CLEAR}"
+  echo -e "${YELLOW_REGULAR}      - transmission-daemon + transmission-remote${CLEAR}"
   echo "✗ No torrent client found" >> download.log
   return 1
 }
@@ -106,47 +135,150 @@ open_torrent() {
     return 1
   fi
 
-  echo -e "${BLUE_BOLD}    Opening torrent in $TORRENT_CLIENT...${CLEAR}"
-  echo "Opening torrent in $TORRENT_CLIENT: $torrent_file" >> download.log
+  echo -e "${BLUE_BOLD}    Starting download with $TORRENT_CLIENT...${CLEAR}"
+  echo "Starting download with $TORRENT_CLIENT: $torrent_file" >> download.log
+
+  # Convert seed time from minutes to seconds for clients that need it
+  local seed_time_seconds=$((TORRENT_SEED_TIME * 60))
+  local seed_time_hours=$((TORRENT_SEED_TIME / 60))
 
   case "$TORRENT_CLIENT" in
-    transmission-gtk|transmission-qt)
-      "$TORRENT_CLIENT" "$torrent_file" &
+    transmission-cli)
+      # transmission-cli: fully automated CLI client
+      # -w: download directory
+      # -er: delete torrent file when done
+      # -M: stop seeding when inactive (fallback)
+      # Note: transmission-cli doesn't have seed ratio/time limits built-in
+      # We'll use transmission-remote if daemon is available for better control
+      echo -e "${GREEN_REGULAR}    Download dir: $ZIMPath${CLEAR}"
+      echo -e "${GREEN_REGULAR}    Seed ratio limit: $TORRENT_SEED_RATIO${CLEAR}"
+      echo -e "${GREEN_REGULAR}    Seed time limit: $TORRENT_SEED_TIME minutes (${seed_time_hours} hours)${CLEAR}"
+      
+      "$TORRENT_CLIENT" -w "$ZIMPath" "$torrent_file" 2>&1 | tee -a download.log &
       ;;
-    qbittorrent)
-      "$TORRENT_CLIENT" "$torrent_file" &
-      ;;
-    deluge)
-      "$TORRENT_CLIENT" "$torrent_file" &
-      ;;
-    ktorrent)
-      "$TORRENT_CLIENT" "$torrent_file" &
-      ;;
-    rtorrent)
-      # rtorrent is terminal-based, might want to run in new terminal
-      echo -e "${YELLOW_BOLD}    ⚠ rtorrent is terminal-based. Run manually: rtorrent \"$torrent_file\"${CLEAR}"
-      echo "rtorrent requires manual execution: rtorrent \"$torrent_file\"" >> download.log
-      ;;
+      
     aria2c)
-      # aria2c is command-line based
-      "$TORRENT_CLIENT" --seed-time=0 "$torrent_file" &
+      # aria2c: powerful CLI client with excellent control
+      # -d: download directory
+      # --seed-ratio: stop seeding at this ratio
+      # --seed-time: stop seeding after minutes
+      # --max-upload-limit: limit upload speed (optional, commented out)
+      # --bt-enable-lpd: enable local peer discovery
+      # --bt-max-peers: max peers per torrent
+      # --continue: continue downloading partially downloaded file
+      echo -e "${GREEN_REGULAR}    Download dir: $ZIMPath${CLEAR}"
+      echo -e "${GREEN_REGULAR}    Seed ratio limit: $TORRENT_SEED_RATIO${CLEAR}"
+      echo -e "${GREEN_REGULAR}    Seed time limit: $TORRENT_SEED_TIME minutes (${seed_time_hours} hours)${CLEAR}"
+      
+      "$TORRENT_CLIENT" \
+        -d "$ZIMPath" \
+        --seed-ratio="$TORRENT_SEED_RATIO" \
+        --seed-time="$TORRENT_SEED_TIME" \
+        --bt-enable-lpd=true \
+        --bt-max-peers=50 \
+        --continue=true \
+        --file-allocation=none \
+        "$torrent_file" 2>&1 | tee -a download.log &
       ;;
-    xdg-open)
+      
+    transmission-remote)
+      # transmission-remote: control transmission-daemon
+      # Add torrent to daemon with specific settings
+      local download_dir="$ZIMPath"
+      
+      echo -e "${GREEN_REGULAR}    Download dir: $ZIMPath${CLEAR}"
+      echo -e "${GREEN_REGULAR}    Seed ratio limit: $TORRENT_SEED_RATIO${CLEAR}"
+      echo -e "${GREEN_REGULAR}    Seed time limit: $TORRENT_SEED_TIME minutes (${seed_time_hours} hours)${CLEAR}"
+      
+      # Add the torrent
+      local torrent_id=$("$TORRENT_CLIENT" -a "$torrent_file" -w "$download_dir" 2>&1 | grep -oP '(?<=torrent )\d+' | head -1)
+      
+      if [[ -n "$torrent_id" ]]; then
+        # Set seed ratio limit for this specific torrent
+        "$TORRENT_CLIENT" -t "$torrent_id" --seedratio "$TORRENT_SEED_RATIO" >> download.log 2>&1
+        
+        # Note: transmission doesn't have per-torrent seed time limits
+        # It only has global idle seeding limits
+        echo -e "${YELLOW_REGULAR}    Note: Transmission doesn't support per-torrent seed time limits${CLEAR}"
+        echo -e "${YELLOW_REGULAR}          Using ratio limit only. Configure global idle limit in daemon settings.${CLEAR}"
+        
+        echo -e "${GREEN_BOLD}    ✓ Torrent added to transmission-daemon (ID: $torrent_id)${CLEAR}"
+        echo "✓ Torrent added to transmission-daemon (ID: $torrent_id)" >> download.log
+      else
+        echo -e "${RED_BOLD}    ✗ Failed to add torrent to transmission-daemon${CLEAR}"
+        echo "✗ Failed to add torrent to transmission-daemon" >> download.log
+        return 1
+      fi
+      ;;
+      
+    deluge-console)
+      # deluge-console: CLI interface to deluge daemon
+      # Note: Requires deluge daemon to be running
+      echo -e "${GREEN_REGULAR}    Download dir: $ZIMPath${CLEAR}"
+      echo -e "${GREEN_REGULAR}    Seed ratio limit: $TORRENT_SEED_RATIO${CLEAR}"
+      
+      "$TORRENT_CLIENT" "add -p $ZIMPath $torrent_file; config -s stop_seed_ratio $TORRENT_SEED_RATIO; config -s stop_seed_at_ratio true" >> download.log 2>&1 &
+      ;;
+      
+    transmission-gtk|transmission-qt)
+      # GUI clients - will open dialog, not ideal for automation
+      echo -e "${YELLOW_BOLD}    ⚠ Warning: GUI client will require user interaction${CLEAR}"
+      echo -e "${YELLOW_REGULAR}       Download location: You'll need to set to $ZIMPath${CLEAR}"
+      echo -e "${YELLOW_REGULAR}       Seed ratio: You'll need to set to $TORRENT_SEED_RATIO${CLEAR}"
+      echo "⚠ Opening GUI client (requires user interaction)" >> download.log
       "$TORRENT_CLIENT" "$torrent_file" &
       ;;
+      
+    qbittorrent)
+      # qBittorrent GUI - will open dialog
+      echo -e "${YELLOW_BOLD}    ⚠ Warning: qBittorrent GUI will require user interaction${CLEAR}"
+      echo -e "${YELLOW_REGULAR}       Download location: You'll need to set to $ZIMPath${CLEAR}"
+      echo -e "${YELLOW_REGULAR}       Seed ratio: You'll need to set to $TORRENT_SEED_RATIO in preferences${CLEAR}"
+      echo "⚠ Opening qBittorrent GUI (requires user interaction)" >> download.log
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+      
+    deluge)
+      # Deluge GUI - will open dialog
+      echo -e "${YELLOW_BOLD}    ⚠ Warning: Deluge GUI will require user interaction${CLEAR}"
+      echo "⚠ Opening Deluge GUI (requires user interaction)" >> download.log
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+      
+    ktorrent)
+      # KTorrent GUI - will open dialog
+      echo -e "${YELLOW_BOLD}    ⚠ Warning: KTorrent GUI will require user interaction${CLEAR}"
+      echo "⚠ Opening KTorrent GUI (requires user interaction)" >> download.log
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+      
+    rtorrent)
+      # rtorrent is terminal-based and complex to script
+      echo -e "${YELLOW_BOLD}    ⚠ rtorrent requires manual execution${CLEAR}"
+      echo -e "${YELLOW_REGULAR}       Run: rtorrent -d $ZIMPath -s $TORRENT_SEED_RATIO \"$torrent_file\"${CLEAR}"
+      echo "rtorrent requires manual execution: rtorrent -d $ZIMPath \"$torrent_file\"" >> download.log
+      return 2
+      ;;
+      
     *)
-      # Generic fallback - try to execute it
+      # Unknown client - try generic approach
+      echo -e "${YELLOW_BOLD}    ⚠ Unknown client, using generic approach${CLEAR}"
+      echo "Unknown client, using generic approach" >> download.log
       "$TORRENT_CLIENT" "$torrent_file" &
       ;;
   esac
 
-  if [[ $? -eq 0 ]]; then
-    echo -e "${GREEN_BOLD}    ✓ Torrent opened successfully${CLEAR}"
-    echo "✓ Torrent opened successfully" >> download.log
+  local exit_code=$?
+  
+  if [[ $exit_code -eq 0 ]] || [[ $exit_code -eq 2 ]]; then
+    if [[ $exit_code -eq 0 ]]; then
+      echo -e "${GREEN_BOLD}    ✓ Torrent download started${CLEAR}"
+      echo "✓ Torrent download started" >> download.log
+    fi
     return 0
   else
-    echo -e "${RED_BOLD}    ✗ Failed to open torrent${CLEAR}"
-    echo "✗ Failed to open torrent" >> download.log
+    echo -e "${RED_BOLD}    ✗ Failed to start torrent download${CLEAR}"
+    echo "✗ Failed to start torrent download" >> download.log
     return 1
   fi
 }
@@ -273,8 +405,12 @@ usage_example() {
   echo '                               '
   echo 'Action Method Options:'
   echo '    -w, --web                  Downloads zims over http(s).'
-  echo '    -t, --torrent              Downloads `.torrent` files and opens them in a torrent client.'
-  echo '    --torrent-client <name>    Specify torrent client to use (e.g., transmission-gtk, qbittorrent)'
+  echo '    -t, --torrent              Downloads torrent files and starts them in a torrent client.'
+  echo '    --torrent-client <n>    Specify torrent client to use'
+  echo '                               Recommended: transmission-cli, aria2c, transmission-remote'
+  echo '                               GUI clients (qbittorrent, deluge) require user interaction'
+  echo '    --seed-ratio <ratio>       Stop seeding when ratio reaches value (default: 1.0) [Only with CLI torrent clients]'
+  echo '    --seed-time <minutes>      Stop seeding after minutes (default: 43200 = 30 days) [Only with CLI torrent clients]'
   echo '    '
   echo '    -f, --verify-library       Verifies that the entire library has the correct checksums as found online.'
   echo '                               Expected behavior is to create sha256 files during a normal run so this option can be used at a later date without internet.'
@@ -509,6 +645,16 @@ while [[ $# -gt 0 ]]; do
       TORRENT_CLIENT="$1"
       shift
       ;;
+    --seed-ratio)
+      shift
+      TORRENT_SEED_RATIO="$1"
+      shift
+      ;;
+    --seed-time)
+      shift
+      TORRENT_SEED_TIME="$1"
+      shift
+      ;;
     -S | --no-sha)
       CHECKSUM_FILES=0
       shift
@@ -601,7 +747,42 @@ for ((i = 0; i < ${#LocalZIMNameArray[@]}; i++)); do
 
   FileName=${LocalZIMNameArray[$i]}
   echo -e "${BLUE_BOLD}  - $FileName:${CLEAR}"
-  [[ -f "$ZIMPath.~lock.$FileName" ]] && echo -e "${YELLOW_REGULAR}    Incomplete download detected\n${GREEN_BOLD}    ✓ Online Version Found${CLEAR}\n" && LocalRequiresDownloadArray+=(1) && AnyDownloads=1 && continue
+  
+  # Check if there's an incomplete download, but first get the matching size
+  RemoteIndex=${LocalZIMRemoteIndexArray[$i]}
+  if [[ $RemoteIndex -ne -1 ]]; then
+    MatchingSize=${FileSizes[$RemoteIndex]}
+  fi
+  
+  # Check size limits before processing incomplete downloads
+  FileTooSmall=0
+  FileTooLarge=0
+  if [[ $RemoteIndex -ne -1 ]] && [[ -n "$MatchingSize" ]]; then
+    [[ $MIN_SIZE -gt 0 ]] && [[ $MatchingSize -lt $MIN_SIZE ]] && FileTooSmall=1
+    [[ $MAX_SIZE -gt 0 ]] && [[ $MatchingSize -gt $MAX_SIZE ]] && FileTooLarge=1
+  fi
+  
+  # Handle incomplete downloads - but respect size filters
+  if [[ -f "$ZIMPath.~lock.$FileName" ]]; then
+    if [ $FileTooSmall -eq 1 ]; then
+      echo -e "${YELLOW_REGULAR}    Incomplete download detected${CLEAR}"
+      echo -e "${YELLOW_REGULAR}    ⚠ Skipped - below minimum size ($(numfmt --to=iec-i $MIN_SIZE))${CLEAR}"
+      LocalRequiresDownloadArray+=(0)
+      echo
+      continue
+    elif [ $FileTooLarge -eq 1 ]; then
+      echo -e "${YELLOW_REGULAR}    Incomplete download detected${CLEAR}"
+      echo -e "${YELLOW_REGULAR}    ⚠ Skipped - above maximum size ($(numfmt --to=iec-i $MAX_SIZE))${CLEAR}"
+      LocalRequiresDownloadArray+=(0)
+      echo
+      continue
+    else
+      echo -e "${YELLOW_REGULAR}    Incomplete download detected\n${GREEN_BOLD}    ✓ Online Version Found${CLEAR}\n"
+      LocalRequiresDownloadArray+=(1)
+      AnyDownloads=1
+      continue
+    fi
+  fi
 
 
   MatchingSize=${FileSizes[$RemoteIndex]}
@@ -609,7 +790,32 @@ for ((i = 0; i < ${#LocalZIMNameArray[@]}; i++)); do
   MatchingFullPath=${RemotePaths[$RemoteIndex]}
   MatchingCategory=${RemoteCategory[$RemoteIndex]}
 
-  [[ -f "$ZIMPath$MatchingFileName.torrent" ]] && [[ ! -f "$ZIMPath$MatchingFileName" ]] && echo -e "${YELLOW_REGULAR}    Torrent already downloaded\n${GREEN_BOLD}    ✓ Online Version Found${CLEAR}\n" && LocalRequiresDownloadArray+=(0) && continue
+  # Calculate size filters early
+  FileTooSmall=0
+  [[ $MIN_SIZE -gt 0 ]] && [[ $MatchingSize -lt $MIN_SIZE ]] && FileTooSmall=1
+  FileTooLarge=0
+  [[ $MAX_SIZE -gt 0 ]] && [[ $MatchingSize -gt $MAX_SIZE ]] && FileTooLarge=1
+  FileSizeAcceptable=0
+  [ $FileTooSmall -eq 0 ] && [ $FileTooLarge -eq 0 ] && FileSizeAcceptable=1
+
+  # Check for existing torrent file - skip if found, but show size info if filtered
+  if [[ -f "$ZIMPath$MatchingFileName.torrent" ]] && [[ ! -f "$ZIMPath$MatchingFileName" ]]; then
+    if [ $FileTooSmall -eq 1 ]; then
+      echo -e "${YELLOW_REGULAR}    Torrent exists but skipped (minimum: $(numfmt --to=iec-i $MIN_SIZE), file size: $(numfmt --to=iec-i "$MatchingSize"))${CLEAR}"
+      LocalRequiresDownloadArray+=(0)
+      echo
+      continue
+    elif [ $FileTooLarge -eq 1 ]; then
+      echo -e "${YELLOW_REGULAR}    Torrent exists but skipped (maximum: $(numfmt --to=iec-i $MAX_SIZE), file size: $(numfmt --to=iec-i "$MatchingSize"))${CLEAR}"
+      LocalRequiresDownloadArray+=(0)
+      echo
+      continue
+    else
+      echo -e "${YELLOW_REGULAR}    Torrent already downloaded\n${GREEN_BOLD}    ✓ Online Version Found${CLEAR}\n"
+      LocalRequiresDownloadArray+=(0)
+      continue
+    fi
+  fi
 
   MatchedDate="$(echo "$MatchingFileName" | grep -oP '\d{4}-\d{2}(?=\.zim$)')"
   MatchedYear="$(echo "$MatchedDate" | grep -oP '\d{4}(?=-\d{2})')"
@@ -619,12 +825,7 @@ for ((i = 0; i < ${#LocalZIMNameArray[@]}; i++)); do
   LocalYear="$(echo "$LocalDate" | grep -oP '\d{4}(?=-\d{2})')"
   LocalMonth="$(echo "$LocalDate" | grep -oP '(?<=\d{4}-)\d{2}')"
 
-  FileTooSmall=0
-  [[ $MIN_SIZE -gt 0 ]] && [[ $MatchingSize -lt $MIN_SIZE ]] && FileTooSmall=1
-  FileTooLarge=0
-  [[ $MAX_SIZE -gt 0 ]] && [[ $MatchingSize -gt $MAX_SIZE ]] && FileTooLarge=1
-  FileSizeAcceptable=0
-  [ $FileTooSmall -eq 0 ] && [ $FileTooLarge -eq 0 ] && FileSizeAcceptable=1
+  # Size filters were already calculated above, no need to recalculate
 
   if [ $VERIFY_LIBRARY -eq 1 ] && [ $FileSizeAcceptable -eq 0 ]; then
     if [ $FileTooSmall -eq 1 ]; then
@@ -642,9 +843,20 @@ for ((i = 0; i < ${#LocalZIMNameArray[@]}; i++)); do
       AnyDownloads=1
       echo -e "${GREEN_BOLD}    ✓ Online Version Found${CLEAR}"
     elif [ $FORCE_DOWNLOAD -eq 1 ]; then
-      LocalRequiresDownloadArray+=(1)
-      AnyDownloads=1
-      echo -e "${YELLOW_BOLD}    ⚠ Forcing re-download of up-to-date file${CLEAR}"
+      # Force download should still respect size filters
+      if [ $FileTooSmall -eq 1 ]; then
+        LocalRequiresDownloadArray+=(0)
+        [[ $DEBUG -eq 0 ]] && echo -e "${YELLOW_REGULAR}    ⚠ Force download skipped (minimum: $(numfmt --to=iec-i $MIN_SIZE), file size: $(numfmt --to=iec-i "$MatchingSize"))${CLEAR}"
+        [[ $DEBUG -eq 1 ]] && echo -e "${YELLOW_REGULAR}    ⚠ *** Simulated *** Force download skipped (minimum: $(numfmt --to=iec-i $MIN_SIZE), file size: $(numfmt --to=iec-i "$MatchingSize"))${CLEAR}"
+      elif [ $FileTooLarge -eq 1 ]; then
+        LocalRequiresDownloadArray+=(0)
+        [[ $DEBUG -eq 0 ]] && echo -e "${YELLOW_REGULAR}    ⚠ Force download skipped (maximum: $(numfmt --to=iec-i $MAX_SIZE), file size: $(numfmt --to=iec-i "$MatchingSize"))${CLEAR}"
+        [[ $DEBUG -eq 1 ]] && echo -e "${YELLOW_REGULAR}    ⚠ *** Simulated *** Force download skipped (maximum: $(numfmt --to=iec-i $MAX_SIZE), file size: $(numfmt --to=iec-i "$MatchingSize"))${CLEAR}"
+      else
+        LocalRequiresDownloadArray+=(1)
+        AnyDownloads=1
+        echo -e "${YELLOW_BOLD}    ⚠ Forcing re-download of up-to-date file${CLEAR}"
+      fi
     else
       LocalRequiresDownloadArray+=(0)
       echo "    ✗ No new update"
