@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VER="3.3-torrent-mod"
+VER="3.4"
 
 # This array will contain all of the local zims, with the file extension
 LocalZIMArray=()
