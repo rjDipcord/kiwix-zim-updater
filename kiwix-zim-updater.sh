@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VER="3.4"
+VER="3.5"
 
 # This array will contain all of the local zims, with the file extension
 LocalZIMArray=()
@@ -41,6 +41,7 @@ CALCULATE_CHECKSUM=0
 CHECKSUM_FILES=1
 VERIFY_LIBRARY=0
 FORCE_FETCH_INDEX=0
+FORCE_DOWNLOAD=0 # Force re-download even if up-to-date
 DOWNLOAD_METHOD=1 # 1: web 2: torrent
 TORRENT_CLIENT="" # Will auto-detect if not specified
 BaseURL="https://download.kiwix.org/zim/"
@@ -263,6 +264,7 @@ usage_example() {
   echo '    -h, --help                 Show this usage and exit.'
   echo '    -u, --skip-update          Skips checking for script updates (very useful for development).'
   echo '    -g, --get-index            Forces using remote index rather than cached index. Cache auto clears after one day'
+  echo '    -F, --force-download       Force re-download even if file is up-to-date (for development/testing).'
   echo '    -n <size>, --min-size      Minimum ZIM Size to be downloaded.'
   echo '                               Specify units include M Mi G Gi, etc. See `man numfmt`'
   echo '    -x <size>, --max-size      Maximum ZIM Size to be downloaded.'
@@ -490,6 +492,10 @@ while [[ $# -gt 0 ]]; do
       FORCE_FETCH_INDEX=1
       shift
       ;;
+    -F | --force-download)
+      FORCE_DOWNLOAD=1
+      shift
+      ;;
     -w | --web)
       DOWNLOAD_METHOD=1
       shift
@@ -544,6 +550,12 @@ echo "            DRY-RUN/SIMULATION"
 [[ $DEBUG -eq 0 ]] && echo
 [[ $DEBUG -eq 0 ]] && echo "             !!! Caution !!!"
 echo
+if [[ $FORCE_DOWNLOAD -eq 1 ]]; then
+  echo "          FORCE DOWNLOAD MODE"
+  echo "               - ENABLED -"
+  echo "   Will re-download up-to-date files"
+  echo
+fi
 echo "=========================================="
 echo
 
@@ -629,6 +641,10 @@ for ((i = 0; i < ${#LocalZIMNameArray[@]}; i++)); do
       LocalRequiresDownloadArray+=(1)
       AnyDownloads=1
       echo -e "${GREEN_BOLD}    ✓ Online Version Found${CLEAR}"
+    elif [ $FORCE_DOWNLOAD -eq 1 ]; then
+      LocalRequiresDownloadArray+=(1)
+      AnyDownloads=1
+      echo -e "${YELLOW_BOLD}    ⚠ Forcing re-download of up-to-date file${CLEAR}"
     else
       LocalRequiresDownloadArray+=(0)
       echo "    ✗ No new update"
@@ -716,7 +732,11 @@ if [ $AnyDownloads -eq 1 ]; then
 
     if [ $VERIFY_LIBRARY -eq 0 ]; then
       if [[ $DOWNLOAD_METHOD -eq 2 ]]; then
-        if [[ -f $NewZIM ]]; then
+        if [[ $FORCE_DOWNLOAD -eq 1 ]] && [[ -f $TorrentFilePath ]]; then
+          [[ $DEBUG -eq 0 ]] && echo -e "${YELLOW_REGULAR}    ⚠ Force download: removing existing torrent${CLEAR}" && rm "$TorrentFilePath"
+          [[ $DEBUG -eq 1 ]] && echo -e "${YELLOW_REGULAR}    ⚠ Force download: *** Simulated *** would remove existing torrent${CLEAR}"
+          RequiresDownload=1
+        elif [[ -f $NewZIM ]]; then
           [[ $DEBUG -eq 0 ]] && echo -e "${GREEN_REGULAR}    ✓ Status : ZIM already exists on disk. Skipping download.${CLEAR}"
           [[ $DEBUG -eq 1 ]] && echo -e "${GREEN_REGULAR}    ✓ Status : *** Simulated ***  ZIM already exists on disk. Skipping download.${CLEAR}"
           echo
@@ -729,6 +749,17 @@ if [ $AnyDownloads -eq 1 ]; then
           [[ $DEBUG -eq 1 ]] && echo -e "${GREEN_REGULAR}    ✓ Status : *** Simulated ***  Torrent doesn't exist on disk. Downloading...${CLEAR}"
           RequiresDownload=1
         fi
+      elif [[ $FORCE_DOWNLOAD -eq 1 ]] && [[ -f $NewZIM ]]; then
+        # Force download mode: remove existing file and download fresh copy
+        if [[ $DEBUG -eq 0 ]]; then
+          echo -e "${YELLOW_REGULAR}    ⚠ Force download: removing existing ZIM${CLEAR}"
+          rm "$NewZIM"
+          [[ -f "$NewZIMPath.sha256" ]] && rm "$NewZIMPath.sha256"
+        else
+          echo -e "${YELLOW_REGULAR}    ⚠ Force download: *** Simulated *** would remove existing ZIM${CLEAR}"
+        fi
+        RequiresDownload=1
+        echo
       elif [[ -f $NewZIM ]] && ! [[ -f $LockFilePath ]]; then # New ZIM already found, and no interruptions, we don't need to download it.
         [[ $DEBUG -eq 0 ]] && echo -e "${GREEN_REGULAR}    ✓ Status : ZIM already exists on disk. Skipping download.${CLEAR}"
         [[ $DEBUG -eq 1 ]] && echo -e "${GREEN_REGULAR}    ✓ Status : *** Simulated ***  ZIM already exists on disk. Skipping download.${CLEAR}"
