@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VER="3.3"
+VER="3.3-torrent-mod"
 
 # This array will contain all of the local zims, with the file extension
 LocalZIMArray=()
@@ -12,6 +12,8 @@ LocalZIMRemoteIndexArray=()
 LocalRequiresDownloadArray=()
 # After updating, this array will be used to store hanging locks and to deal with them
 HangingFileLocks=();
+# Array to store downloaded torrent files that need to be opened
+TorrentFilesToOpen=()
 
 # This array stores the file names that kiwix has to offer, with .zim extensions
 RemoteFiles=()
@@ -40,6 +42,7 @@ CHECKSUM_FILES=1
 VERIFY_LIBRARY=0
 FORCE_FETCH_INDEX=0
 DOWNLOAD_METHOD=1 # 1: web 2: torrent
+TORRENT_CLIENT="" # Will auto-detect if not specified
 BaseURL="https://download.kiwix.org/zim/"
 ZIMPath=""
 
@@ -52,6 +55,100 @@ GREEN_BOLD="\033[1;32m"
 BLUE_REGULAR="\033[0;34m"
 BLUE_BOLD="\033[1;34m"
 CLEAR="\033[0m"
+
+# Detect available torrent client
+detect_torrent_client() {
+  # If user specified a client, verify it exists
+  if [[ -n "$TORRENT_CLIENT" ]]; then
+    if command -v "$TORRENT_CLIENT" &> /dev/null; then
+      echo -e "${GREEN_BOLD}  ✓ Using specified torrent client: $TORRENT_CLIENT${CLEAR}"
+      echo "✓ Using specified torrent client: $TORRENT_CLIENT" >> download.log
+      return 0
+    else
+      echo -e "${RED_BOLD}  ✗ Specified torrent client '$TORRENT_CLIENT' not found${CLEAR}"
+      echo "✗ Specified torrent client '$TORRENT_CLIENT' not found" >> download.log
+      return 1
+    fi
+  fi
+
+  # Auto-detect common torrent clients
+  local clients=("transmission-gtk" "transmission-qt" "qbittorrent" "deluge" "ktorrent" "rtorrent" "aria2c")
+  
+  for client in "${clients[@]}"; do
+    if command -v "$client" &> /dev/null; then
+      TORRENT_CLIENT="$client"
+      echo -e "${GREEN_BOLD}  ✓ Auto-detected torrent client: $TORRENT_CLIENT${CLEAR}"
+      echo "✓ Auto-detected torrent client: $TORRENT_CLIENT" >> download.log
+      return 0
+    fi
+  done
+
+  # Try xdg-open as fallback (works on most Linux desktops)
+  if command -v xdg-open &> /dev/null; then
+    TORRENT_CLIENT="xdg-open"
+    echo -e "${YELLOW_BOLD}  ⚠ Using xdg-open to open torrents with default application${CLEAR}"
+    echo "⚠ Using xdg-open to open torrents with default application" >> download.log
+    return 0
+  fi
+
+  echo -e "${RED_BOLD}  ✗ No torrent client found. Please install one or specify with --torrent-client${CLEAR}"
+  echo "✗ No torrent client found" >> download.log
+  return 1
+}
+
+# Open torrent file in client
+open_torrent() {
+  local torrent_file="$1"
+  
+  if [[ ! -f "$torrent_file" ]]; then
+    echo -e "${RED_BOLD}    ✗ Torrent file not found: $torrent_file${CLEAR}"
+    return 1
+  fi
+
+  echo -e "${BLUE_BOLD}    Opening torrent in $TORRENT_CLIENT...${CLEAR}"
+  echo "Opening torrent in $TORRENT_CLIENT: $torrent_file" >> download.log
+
+  case "$TORRENT_CLIENT" in
+    transmission-gtk|transmission-qt)
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+    qbittorrent)
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+    deluge)
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+    ktorrent)
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+    rtorrent)
+      # rtorrent is terminal-based, might want to run in new terminal
+      echo -e "${YELLOW_BOLD}    ⚠ rtorrent is terminal-based. Run manually: rtorrent \"$torrent_file\"${CLEAR}"
+      echo "rtorrent requires manual execution: rtorrent \"$torrent_file\"" >> download.log
+      ;;
+    aria2c)
+      # aria2c is command-line based
+      "$TORRENT_CLIENT" --seed-time=0 "$torrent_file" &
+      ;;
+    xdg-open)
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+    *)
+      # Generic fallback - try to execute it
+      "$TORRENT_CLIENT" "$torrent_file" &
+      ;;
+  esac
+
+  if [[ $? -eq 0 ]]; then
+    echo -e "${GREEN_BOLD}    ✓ Torrent opened successfully${CLEAR}"
+    echo "✓ Torrent opened successfully" >> download.log
+    return 0
+  else
+    echo -e "${RED_BOLD}    ✗ Failed to open torrent${CLEAR}"
+    echo "✗ Failed to open torrent" >> download.log
+    return 1
+  fi
+}
 
 # This will ask the api what files it has to offer and store them in arrays
 master_scrape() {
@@ -174,7 +271,8 @@ usage_example() {
   echo '                               '
   echo 'Action Method Options:'
   echo '    -w, --web                  Downloads zims over http(s).'
-  echo '    -t, --torrent              Downloads `.torrent` files. REQUIRES ADDITIONAL SOFTWARE TO EXECUTE DOWNLOAD.'
+  echo '    -t, --torrent              Downloads `.torrent` files and opens them in a torrent client.'
+  echo '    --torrent-client <name>    Specify torrent client to use (e.g., transmission-gtk, qbittorrent)'
   echo '    '
   echo '    -f, --verify-library       Verifies that the entire library has the correct checksums as found online.'
   echo '                               Expected behavior is to create sha256 files during a normal run so this option can be used at a later date without internet.'
@@ -400,6 +498,11 @@ while [[ $# -gt 0 ]]; do
       DOWNLOAD_METHOD=2
       shift
       ;;
+    --torrent-client)
+      shift
+      TORRENT_CLIENT="$1"
+      shift
+      ;;
     -S | --no-sha)
       CHECKSUM_FILES=0
       shift
@@ -447,6 +550,18 @@ echo
 # First, Self-Update Check.
 # Shouldnt this be first? it is not dependent on anything else and resets everything, so may as well reset it before getting all invested?
 self_update
+
+# If torrent mode is enabled, detect/verify torrent client
+if [[ $DOWNLOAD_METHOD -eq 2 ]]; then
+  echo -e "${YELLOW_BOLD}Detecting Torrent Client...${CLEAR}"
+  echo "Detecting Torrent Client..." >> download.log
+  if ! detect_torrent_client; then
+    echo -e "${RED_BOLD}Cannot proceed with torrent downloads without a torrent client.${CLEAR}"
+    echo "Cannot proceed with torrent downloads without a torrent client." >> download.log
+    exit 1
+  fi
+  echo
+fi
 
 # Second, Flag Check.
 flags "$@"
@@ -719,6 +834,11 @@ if [ $AnyDownloads -eq 1 ]; then
           [[ $DEBUG -eq 1 ]] && echo "Download : $FilePath" >>download.log
         fi
 
+        # Add torrent file to the list to be opened
+        if [[ $DEBUG -eq 0 ]] && [[ -f "$FilePath" ]]; then
+          TorrentFilesToOpen+=("$FilePath")
+        fi
+
         continue
       else
         [[ $IsMirror -eq 0 ]] && echo -e "${BLUE_REGULAR}    Download (direct) : $DownloadURL${CLEAR}"
@@ -834,13 +954,34 @@ if [ $AnyDownloads -eq 1 ]; then
     [[ $DEBUG -eq 1 ]] && echo "End : $(date -u) *** Simulation ***" >>download.log
   done
 
+  # Open all downloaded torrent files in the torrent client
+  if [[ $DOWNLOAD_METHOD -eq 2 ]] && [[ ${#TorrentFilesToOpen[@]} -gt 0 ]]; then
+    echo
+    echo -e "${YELLOW_BOLD}5. Opening Torrent Files in $TORRENT_CLIENT...${CLEAR}"
+    echo "5. Opening Torrent Files in $TORRENT_CLIENT..." >> download.log
+    echo
+    
+    for torrent_file in "${TorrentFilesToOpen[@]}"; do
+      if [[ $DEBUG -eq 0 ]]; then
+        open_torrent "$torrent_file"
+      else
+        echo -e "${GREEN_BOLD}    ✓ *** Simulated *** Would open: $torrent_file${CLEAR}"
+        echo "*** Simulated *** Would open: $torrent_file" >> download.log
+      fi
+    done
+    echo
+  fi
+
   if [[ $DEBUG -eq 0 ]]; then
     IFS=$'\n' HangingFileLocks=("$ZIMPath".~lock.*.zim)
     unset IFS
 
     if [[ ${#HangingFileLocks[@]} -gt 0 ]]; then
-      echo -e "${YELLOW_BOLD}5. Cleaning up...${CLEAR}"
-      echo "5. Cleaning up..." >> download.log
+      CleanupStep="5"
+      [[ $DOWNLOAD_METHOD -eq 2 ]] && [[ ${#TorrentFilesToOpen[@]} -gt 0 ]] && CleanupStep="6"
+      
+      echo -e "${YELLOW_BOLD}${CleanupStep}. Cleaning up...${CLEAR}"
+      echo "${CleanupStep}. Cleaning up..." >> download.log
       echo
 
       for ((i = 0; i < ${#HangingFileLocks[@]}; i++)); do
